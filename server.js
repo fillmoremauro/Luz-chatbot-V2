@@ -8,7 +8,9 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 const FILLSUN_KNOWLEDGE_BASE = `
 FILLSUN es una empresa orientada a energía solar en Argentina.
@@ -83,4 +85,108 @@ ${FILLSUN_KNOWLEDGE_BASE}
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "luz-backend-v1" });
 });
+
+app.post("/api/chat", async (req, res) => {
+  try {
+    const {
+      message = "",
+      email = "",
+      name = "",
+      phone = "",
+      pageUrl = "",
+      pageTitle = "",
+      conversationId = "",
+    } = req.body || {};
+
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ error: "Mensaje inválido" });
+    }
+
+    const safeEmail = String(email || "").trim();
+    const safeName = String(name || "").trim();
+    const safePhone = String(phone || "").trim();
+    const safeMessage = String(message || "").trim();
+    const safePageUrl = String(pageUrl || "").trim();
+    const safePageTitle = String(pageTitle || "").trim();
+    const safeConversationId = String(conversationId || "").trim();
+
+    const userContext = `
+DATOS ACTUALES DEL USUARIO
+- Email: ${safeEmail || "no informado"}
+- Nombre: ${safeName || "no informado"}
+- Teléfono: ${safePhone || "no informado"}
+- Página actual: ${safePageTitle || "sin título"}
+- URL actual: ${safePageUrl || "sin URL"}
+
+MENSAJE DEL USUARIO
+${safeMessage}
+`;
+
+    const response = await client.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-5-mini",
+      previous_response_id: safeConversationId || undefined,
+      input: userContext,
+      instructions: SYSTEM_PROMPT,
+      max_output_tokens: 500,
+      text: {
+        format: {
+          type: "json_object",
+        },
+      },
+    });
+
+    const rawText = response.output_text || "{}";
+    let parsed;
+
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      parsed = {
+        reply: "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+        ask_name: false,
+        ask_phone: true,
+        show_whatsapp: true,
+        whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
+      };
+    }
+
+    const finalPayload = {
+      reply:
+        typeof parsed.reply === "string" && parsed.reply.trim()
+          ? parsed.reply.trim()
+          : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+      ask_name: Boolean(parsed.ask_name),
+      ask_phone: Boolean(parsed.ask_phone),
+      show_whatsapp: Boolean(parsed.show_whatsapp),
+      whatsapp_text:
+        typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
+          ? parsed.whatsapp_text.trim()
+          : buildWhatsappText({ name: safeName, message: safeMessage }),
+      conversationId: response.id,
+    };
+
+    return res.json(finalPayload);
+  } catch (error) {
+    console.error("[LUZ_BACKEND_ERROR]", error);
+
+    return res.status(500).json({
+      reply:
+        "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
+      ask_name: false,
+      ask_phone: true,
+      show_whatsapp: true,
+      whatsapp_text: buildWhatsappText({ message: "Consulta desde Luz" }),
+      conversationId: "",
+    });
+  }
+});
+
+function buildWhatsappText({ name = "", message = "" }) {
+  const introName = name ? `Me llamo ${name} y ` : "";
+  const topic = message ? ` Tema: ${message}` : "";
+  return `Hola FILLSUN, ${introName}ya hablé con Luz y quiero seguir mi consulta.${topic}`.trim();
+}
+
+app.listen(PORT, () => {
+  console.log(`Luz backend escuchando en puerto ${PORT}`);
 });
