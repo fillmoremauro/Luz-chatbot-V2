@@ -4,7 +4,7 @@ Variables de entorno obligatorias:
 - OPENAI_API_KEY = variable de entorno render
 
 Variable opcional:
-- OPENAI_MODEL = gpt-5-mini
+- OPENAI_MODEL = gpt-5.4-mini
 
 Ruta health:
 GET /health
