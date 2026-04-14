@@ -1,6 +1,9 @@
 import express from "express";
 import cors from "cors";
 import OpenAI from "openai";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,30 +15,41 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const FILLSUN_KNOWLEDGE_BASE = `
-FILLSUN es una empresa orientada a energía solar en Argentina.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const KNOWLEDGE_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_base.md");
 
-IMPORTANTE:
-- Luz debe responder únicamente usando información confirmada de FILLSUN.
-- Si la información no está en esta base, debe decir que no la tiene confirmada.
-- Debe derivar a WhatsApp cuando haga falta seguimiento comercial o técnico.
+async function loadKnowledgeBase() {
+  try {
+    const content = await fs.readFile(KNOWLEDGE_FILE_PATH, "utf8");
+    console.log("[LUZ] Base de conocimiento cargada correctamente.");
+    return content;
+  } catch (error) {
+    console.error("[LUZ] No pude leer knowledge/fillsun_base.md:", error.message);
+    return `
+# FILLSUN Knowledge Base — fallback mínimo
 
-WhatsApp oficial de FILLSUN: +54 9 11 3348 0020
-Sitio principal: https://www.energia-solar.com.ar/
+FILLSUN trabaja con soluciones de energía solar en Argentina.
 
-Contenido temporal:
-- FILLSUN trabaja con termotanques solares, colectores solares, paneles solares, inversores, baterías, kits y soluciones relacionadas.
-- El objetivo de Luz es orientar, no inventar ni cerrar presupuestos sin datos suficientes.
-- Cuando haya intención comercial o consulta compleja, conviene seguir por WhatsApp.
+WhatsApp principal: +54 9 11 3348 0020
+
+Reglas:
+- Responder solo con información confirmada.
+- No inventar.
+- Si falta información, derivar a WhatsApp.
 `;
+  }
+}
+
+const FILLSUN_KNOWLEDGE_BASE = await loadKnowledgeBase();
 
 const SYSTEM_PROMPT = `
 Sos Luz, asistente virtual de FILLSUN.
 
-Tu función es ayudar a potenciales clientes usando únicamente información confirmada en la base de conocimiento incluida en este prompt.
+Tu función es ayudar a potenciales clientes usando únicamente información confirmada en la base de conocimiento incluida más abajo.
 
 OBJETIVOS
-1. Responder dudas sobre productos, usos, diferencias, aplicaciones y orientación general.
+1. Responder dudas generales sobre soluciones solares de FILLSUN.
 2. Mantener respuestas breves, claras, profesionales y naturales, con tono argentino neutro.
 3. No inventar información.
 4. Pedir nombre de forma sutil más adelante si todavía no lo tenés.
@@ -60,6 +74,7 @@ FORMATO DE SALIDA
 Debés responder SIEMPRE en JSON válido.
 No agregues texto antes ni después del JSON.
 Usá exactamente esta estructura:
+
 {
   "reply": "texto breve para el usuario",
   "ask_name": false,
@@ -84,8 +99,16 @@ BASE DE CONOCIMIENTO FILLSUN
 ${FILLSUN_KNOWLEDGE_BASE}
 `;
 
+app.get("/", (_req, res) => {
+  res.send("Luz backend activo.");
+});
+
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "luz-backend-v1" });
+  res.json({
+    ok: true,
+    service: "luz-backend-v2",
+    knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
+  });
 });
 
 app.post("/api/chat", async (req, res) => {
@@ -128,6 +151,14 @@ MENSAJE DEL USUARIO
 ${safeMessage}
 `;
 
+    console.log("[LUZ_CHAT] Nuevo mensaje:", {
+      email: safeEmail || "sin email",
+      name: safeName || "sin nombre",
+      phone: safePhone || "sin telefono",
+      pageTitle: safePageTitle || "sin titulo",
+      message: safeMessage,
+    });
+
     const response = await client.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
       previous_response_id: safeConversationId || undefined,
@@ -137,13 +168,12 @@ ${safeMessage}
     });
 
     const rawText = response.output_text || "{}";
-    let parsed;
+    let parsed = safeParseJson(rawText);
 
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
+    if (!parsed) {
       parsed = {
-        reply: "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+        reply:
+          "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
         ask_name: false,
         ask_phone: true,
         show_whatsapp: true,
@@ -186,6 +216,24 @@ function buildWhatsappText({ name = "", message = "" }) {
   const introName = name ? `Me llamo ${name} y ` : "";
   const topic = message ? ` Tema: ${message}` : "";
   return `Hola FILLSUN, ${introName}ya hablé con Luz y quiero seguir mi consulta.${topic}`.trim();
+}
+
+function safeParseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    try {
+      const firstBrace = text.indexOf("{");
+      const lastBrace = text.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const candidate = text.slice(firstBrace, lastBrace + 1);
+        return JSON.parse(candidate);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
 }
 
 app.listen(PORT, () => {
