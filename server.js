@@ -111,6 +111,10 @@ app.post("/api/chat", async (req, res) => {
     const safeConversationId = String(conversationId || "").trim();
 
     const userContext = `
+IMPORTANTE: devolvé la respuesta en formato json válido.
+Usá exactamente estas claves:
+reply, ask_name, ask_phone, show_whatsapp, whatsapp_text.
+
 DATOS ACTUALES DEL USUARIO
 - Email: ${safeEmail || "no informado"}
 - Nombre: ${safeName || "no informado"}
