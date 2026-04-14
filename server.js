@@ -12,14 +12,11 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const KNOWLEDGE_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_base.md");
-
 const sentLeadAlerts = new Set();
 
 async function loadKnowledgeBase() {
@@ -29,18 +26,7 @@ async function loadKnowledgeBase() {
     return content;
   } catch (error) {
     console.error("[LUZ] No pude leer knowledge/fillsun_base.md:", error.message);
-    return `
-# FILLSUN Knowledge Base — fallback mínimo
-
-FILLSUN trabaja con soluciones de energía solar en Argentina.
-
-WhatsApp principal: +54 9 11 3348 0020
-
-Reglas:
-- Responder solo con información confirmada.
-- No inventar.
-- Si falta información, derivar a WhatsApp.
-`;
+    return `FILLSUN trabaja con soluciones de energía solar en Argentina. Si falta información, derivar a WhatsApp.`;
   }
 }
 
@@ -56,8 +42,8 @@ OBJETIVOS
 2. Mantener respuestas breves, claras, profesionales y naturales, con tono argentino neutro.
 3. No inventar información.
 4. Pedir nombre de forma sutil más adelante si todavía no lo tenés.
-5. Pedir teléfono solo cuando haya intención comercial real o convenga derivar a un asesor.
-6. Llevar la conversación a WhatsApp cuando la consulta requiera cierre, presupuesto, confirmación técnica, disponibilidad o seguimiento humano.
+5. Pedir teléfono solo cuando haya intención comercial real o cuando el usuario ya esté en una etapa útil para avanzar.
+6. Llevar la conversación a WhatsApp cuando la consulta requiera cierre, presupuesto, confirmación técnica específica, disponibilidad o seguimiento humano.
 
 REGLAS OBLIGATORIAS
 - Nunca inventes datos.
@@ -73,18 +59,19 @@ REGLAS OBLIGATORIAS
 REGLAS MUY IMPORTANTES SOBRE WHATSAPP
 - NO muestres WhatsApp en cada respuesta.
 - Para consultas informativas normales, show_whatsapp debe ser false.
-- show_whatsapp solo debe ser true si el usuario pide precio, presupuesto, instalación, disponibilidad, stock, asesor, visita, compra, o si claramente ya corresponde pasar a un humano.
+- show_whatsapp solo debe ser true si el usuario pide precio, presupuesto, instalación, disponibilidad, stock, asesor, visita, compra, contacto humano, o si claramente ya corresponde pasar a un humano.
 - Si la conversación sigue siendo orientativa o educativa, show_whatsapp debe seguir en false.
-- No repitas derivación a WhatsApp en respuestas consecutivas si no hace falta.
 
-RESPUESTA CUANDO LA BASE NO ALCANZA
-"No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo."
+REGLAS MUY IMPORTANTES SOBRE ask_phone
+- ask_phone debe ser true si el usuario ya dio email y nombre, y además:
+  a) pide precio, presupuesto, instalación, stock, disponibilidad o asesor, o
+  b) ya hizo varias preguntas útiles y parece interesado en avanzar.
+- No hace falta esperar a que el usuario lo pida explícitamente.
 
 FORMATO DE SALIDA
 Debés responder SIEMPRE en JSON válido.
 No agregues texto antes ni después del JSON.
 Usá exactamente esta estructura:
-
 {
   "reply": "texto breve para el usuario",
   "ask_name": false,
@@ -92,18 +79,6 @@ Usá exactamente esta estructura:
   "show_whatsapp": false,
   "whatsapp_text": "mensaje corto para WhatsApp"
 }
-
-REGLAS PARA ask_name
-- true solo si ya existe email, todavía no existe nombre, y la conversación ya avanzó un poco.
-- false en cualquier otro caso.
-
-REGLAS PARA ask_phone
-- true solo si detectás intención comercial, presupuesto, instalación, compra, visita, asesor o confirmación técnica.
-- false en cualquier otro caso.
-
-REGLAS PARA show_whatsapp
-- true solo si realmente conviene derivar.
-- false en consultas informativas normales.
 
 BASE DE CONOCIMIENTO FILLSUN
 ${FILLSUN_KNOWLEDGE_BASE}
@@ -116,7 +91,7 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "luz-backend-v4",
+    service: "luz-backend-v5",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
   });
@@ -172,17 +147,6 @@ MENSAJE DEL USUARIO
 ${safeMessage}
 `;
 
-    console.log("[LUZ_CHAT] Nuevo mensaje:", {
-      email: safeEmail || "sin email",
-      name: safeName || "sin nombre",
-      phone: safePhone || "sin telefono",
-      pageTitle: safePageTitle || "sin titulo",
-      interestTag,
-      commercialIntent,
-      messagesCount: safeMessagesCount,
-      message: safeMessage,
-    });
-
     const response = await client.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
       previous_response_id: safeConversationId || undefined,
@@ -196,14 +160,31 @@ ${safeMessage}
 
     if (!parsed) {
       parsed = {
-        reply:
-          "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+        reply: "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
         ask_name: false,
-        ask_phone: true,
-        show_whatsapp: true,
+        ask_phone: false,
+        show_whatsapp: false,
         whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
       };
     }
+
+    const askPhoneFinal = shouldAskPhone({
+      modelValue: Boolean(parsed.ask_phone),
+      email: safeEmail,
+      name: safeName,
+      phone: safePhone,
+      commercialIntent,
+      safeMessagesCount,
+    });
+
+    const showWhatsappFinal = shouldShowWhatsapp({
+      modelValue: Boolean(parsed.show_whatsapp),
+      commercialIntent,
+      safePhone,
+      safeMessage,
+      safeMessagesCount,
+      askPhoneFinal,
+    });
 
     const finalPayload = {
       reply:
@@ -211,14 +192,8 @@ ${safeMessage}
           ? parsed.reply.trim()
           : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
       ask_name: Boolean(parsed.ask_name),
-      ask_phone: Boolean(parsed.ask_phone),
-      show_whatsapp: shouldShowWhatsapp({
-        modelValue: Boolean(parsed.show_whatsapp),
-        commercialIntent,
-        safePhone,
-        safeMessage,
-        safeMessagesCount,
-      }),
+      ask_phone: askPhoneFinal,
+      show_whatsapp: showWhatsappFinal,
       whatsapp_text:
         typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
           ? parsed.whatsapp_text.trim()
@@ -236,12 +211,7 @@ ${safeMessage}
     });
 
     if (shouldSendLeadAlert) {
-      const alertKey = buildAlertKey({
-        sessionId: safeSessionId,
-        email: safeEmail,
-        interestTag,
-      });
-
+      const alertKey = buildAlertKey({ sessionId: safeSessionId, email: safeEmail, interestTag });
       if (!sentLeadAlerts.has(alertKey)) {
         const sent = await sendLeadAlertEmail({
           email: safeEmail,
@@ -254,22 +224,17 @@ ${safeMessage}
           commercialIntent,
           assistantReply: finalPayload.reply,
         });
-
-        if (sent) {
-          sentLeadAlerts.add(alertKey);
-        }
+        if (sent) sentLeadAlerts.add(alertKey);
       }
     }
 
     return res.json(finalPayload);
   } catch (error) {
     console.error("[LUZ_BACKEND_ERROR]", error);
-
     return res.status(500).json({
-      reply:
-        "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
+      reply: "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
       ask_name: false,
-      ask_phone: true,
+      ask_phone: false,
       show_whatsapp: true,
       whatsapp_text: buildWhatsappText({ message: "Consulta desde Luz" }),
       conversationId: "",
@@ -279,7 +244,6 @@ ${safeMessage}
 
 function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
   const text = `${message} ${pageTitle} ${pageUrl}`.toLowerCase();
-
   if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) return "termotanques";
   if (/colector|epdm|pileta|piscina|climatiz/.test(text)) return "colectores";
   if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) return "paneles";
@@ -290,19 +254,23 @@ function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
 
 function detectCommercialIntent(message = "") {
   const text = message.toLowerCase();
-  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad/.test(text);
+  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link/.test(text);
 }
 
-function shouldShowWhatsapp({ modelValue = false, commercialIntent = false, safePhone = "", safeMessage = "", safeMessagesCount = 0 }) {
-  if (!modelValue) return false;
+function shouldAskPhone({ modelValue = false, email = "", name = "", phone = "", commercialIntent = false, safeMessagesCount = 0 }) {
+  if (phone) return false;
+  if (!email) return false;
+  if (!name) return false;
   if (commercialIntent) return true;
-  if (safePhone) return true;
-  if (/whatsapp|asesor|hablar con alguien|presupuesto|precio|cotizaci[oó]n|instalaci[oó]n|comprar|stock|disponibilidad|visitar/.test(safeMessage.toLowerCase())) {
-    return true;
-  }
-  if (safeMessagesCount >= 5 && /no tengo esa información confirmada|seguir por whatsapp/.test(safeMessage.toLowerCase())) {
-    return true;
-  }
+  if (modelValue && safeMessagesCount >= 4) return true;
+  return false;
+}
+
+function shouldShowWhatsapp({ modelValue = false, commercialIntent = false, safePhone = "", safeMessage = "", safeMessagesCount = 0, askPhoneFinal = false }) {
+  if (/pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|asesor|hablar con una persona/.test(safeMessage.toLowerCase())) return true;
+  if (commercialIntent && !askPhoneFinal) return true;
+  if (safePhone && safeMessagesCount >= 4) return true;
+  if (modelValue && safeMessagesCount >= 5 && !askPhoneFinal) return true;
   return false;
 }
 
@@ -310,110 +278,35 @@ function shouldSendAlert({ email = "", phone = "", commercialIntent = false, sho
   const hasEmail = Boolean(email);
   const hasPhone = Boolean(phone);
   const hasRealQuestion = String(message || "").trim().length >= 8;
-
-  return hasRealQuestion && (
-    (hasEmail && hasPhone) ||
-    (hasEmail && commercialIntent) ||
-    (hasEmail && showWhatsapp && commercialIntent)
-  );
+  return hasRealQuestion && ((hasEmail && hasPhone) || (hasEmail && commercialIntent) || (hasEmail && showWhatsapp && commercialIntent));
 }
 
 function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) {
-  const sessionPart = sessionId || "sin_sesion";
-  const emailPart = email || "sin_email";
-  return `${sessionPart}__${emailPart}__${interestTag}`;
+  return `${sessionId || "sin_sesion"}__${email || "sin_email"}__${interestTag}`;
 }
 
 function isEmailAlertsConfigured() {
-  return Boolean(
-    process.env.SMTP_HOST &&
-    process.env.SMTP_PORT &&
-    process.env.SMTP_USER &&
-    process.env.SMTP_PASS &&
-    process.env.LEAD_ALERT_TO
-  );
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.LEAD_ALERT_TO);
 }
 
-async function sendLeadAlertEmail({
-  email = "",
-  name = "",
-  phone = "",
-  pageTitle = "",
-  pageUrl = "",
-  message = "",
-  interestTag = "general",
-  commercialIntent = false,
-  assistantReply = "",
-}) {
-  if (!isEmailAlertsConfigured()) {
-    console.log("[LUZ_EMAIL] Alertas por email no configuradas. Salteando envío.");
-    return false;
-  }
-
+async function sendLeadAlertEmail({ email = "", name = "", phone = "", pageTitle = "", pageUrl = "", message = "", interestTag = "general", commercialIntent = false, assistantReply = "" }) {
+  if (!isEmailAlertsConfigured()) return false;
   try {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT),
       secure: Number(process.env.SMTP_PORT) === 465,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
-
     const subject = `Nuevo lead desde Luz — ${interestTag}`;
     const now = new Date().toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" });
-
-    const textBody = `
-Nuevo lead detectado desde Luz.
-
-Fecha: ${now}
-Interés: ${interestTag}
-Intención comercial: ${commercialIntent ? "sí" : "no"}
-
-Nombre: ${name || "no informado"}
-Email: ${email || "no informado"}
-Teléfono: ${phone || "no informado"}
-
-Página: ${pageTitle || "sin título"}
-URL: ${pageUrl || "sin URL"}
-
-Consulta:
-${message || "sin mensaje"}
-
-Respuesta de Luz:
-${assistantReply || "sin respuesta"}
-`.trim();
-
-    const htmlBody = `
-      <div style="font-family:Arial,Helvetica,sans-serif; line-height:1.5; color:#243040;">
-        <h2 style="margin:0 0 16px;">Nuevo lead desde Luz</h2>
-        <p><strong>Fecha:</strong> ${escapeHtml(now)}</p>
-        <p><strong>Interés:</strong> ${escapeHtml(interestTag)}</p>
-        <p><strong>Intención comercial:</strong> ${commercialIntent ? "sí" : "no"}</p>
-        <hr>
-        <p><strong>Nombre:</strong> ${escapeHtml(name || "no informado")}</p>
-        <p><strong>Email:</strong> ${escapeHtml(email || "no informado")}</p>
-        <p><strong>Teléfono:</strong> ${escapeHtml(phone || "no informado")}</p>
-        <hr>
-        <p><strong>Página:</strong> ${escapeHtml(pageTitle || "sin título")}</p>
-        <p><strong>URL:</strong> ${escapeHtml(pageUrl || "sin URL")}</p>
-        <hr>
-        <p><strong>Consulta:</strong><br>${escapeHtml(message || "sin mensaje")}</p>
-        <p><strong>Respuesta de Luz:</strong><br>${escapeHtml(assistantReply || "sin respuesta")}</p>
-      </div>
-    `;
-
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: process.env.LEAD_ALERT_TO,
       replyTo: email || undefined,
       subject,
-      text: textBody,
-      html: htmlBody,
+      text: `Fecha: ${now}\nInterés: ${interestTag}\nIntención comercial: ${commercialIntent ? "sí" : "no"}\nNombre: ${name || "no informado"}\nEmail: ${email || "no informado"}\nTeléfono: ${phone || "no informado"}\nPágina: ${pageTitle || "sin título"}\nURL: ${pageUrl || "sin URL"}\nConsulta: ${message || "sin mensaje"}\nRespuesta de Luz: ${assistantReply || "sin respuesta"}`,
     });
-
-    console.log("[LUZ_EMAIL] Alerta enviada correctamente.");
     return true;
   } catch (error) {
     console.error("[LUZ_EMAIL_ERROR]", error);
@@ -434,24 +327,12 @@ function safeParseJson(text) {
     try {
       const firstBrace = text.indexOf("{");
       const lastBrace = text.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        const candidate = text.slice(firstBrace, lastBrace + 1);
-        return JSON.parse(candidate);
-      }
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) return JSON.parse(text.slice(firstBrace, lastBrace + 1));
       return null;
     } catch {
       return null;
     }
   }
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 app.listen(PORT, () => {
