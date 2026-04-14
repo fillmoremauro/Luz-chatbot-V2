@@ -16,21 +16,33 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const KNOWLEDGE_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_base.md");
+const WIKI_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_wiki.md");
 const sentLeadAlerts = new Set();
 
-async function loadKnowledgeBase() {
+async function loadTextFile(filePath, label, fallback = "") {
   try {
-    const content = await fs.readFile(KNOWLEDGE_FILE_PATH, "utf8");
-    console.log("[LUZ] Base de conocimiento cargada correctamente.");
+    const content = await fs.readFile(filePath, "utf8");
+    console.log(`[LUZ] ${label} cargado correctamente.`);
     return content;
   } catch (error) {
-    console.error("[LUZ] No pude leer knowledge/fillsun_base.md:", error.message);
-    return `FILLSUN trabaja con soluciones de energía solar en Argentina. Si falta información, derivar a WhatsApp.`;
+    console.error(`[LUZ] No pude leer ${filePath}:`, error.message);
+    return fallback;
   }
 }
 
-const FILLSUN_KNOWLEDGE_BASE = await loadKnowledgeBase();
+const FILLSUN_KNOWLEDGE_BASE = await loadTextFile(
+  KNOWLEDGE_FILE_PATH,
+  "fillsun_base.md",
+  `FILLSUN trabaja con soluciones de energía solar en Argentina. Si falta información, derivar a WhatsApp.`
+);
+
+const FILLSUN_WIKI_BASE = await loadTextFile(
+  WIKI_FILE_PATH,
+  "fillsun_wiki.md",
+  ``
+);
 
 const SYSTEM_PROMPT = `
 Sos Luz, asistente virtual de FILLSUN.
@@ -56,6 +68,13 @@ REGLAS OBLIGATORIAS
 - No uses tono exageradamente vendedor.
 - Priorizá ayudar, orientar y ordenar la consulta.
 
+REGLAS MUY IMPORTANTES SOBRE LA WIKI
+- La wiki es apoyo educativo general.
+- Usala solo para explicar conceptos simples y frecuentes.
+- No conviertas la respuesta en una explicación larga o enciclopédica.
+- Si la consulta requiere precisión comercial o técnica fina, derivá cuando corresponda.
+- Priorizá siempre el universo FILLSUN.
+
 REGLAS MUY IMPORTANTES SOBRE WHATSAPP
 - NO muestres WhatsApp en cada respuesta.
 - Para consultas informativas normales, show_whatsapp debe ser false.
@@ -80,8 +99,14 @@ Usá exactamente esta estructura:
   "whatsapp_text": "mensaje corto para WhatsApp"
 }
 
-BASE DE CONOCIMIENTO FILLSUN
+BASE OPERATIVA FILLSUN
 ${FILLSUN_KNOWLEDGE_BASE}
+
+WIKI SOLAR COMPLEMENTARIA
+Usala solo para responder dudas generales y educativas, de forma breve y clara.
+No la uses para inventar precios, stock, modelos exactos, plazos ni compatibilidades puntuales.
+
+${FILLSUN_WIKI_BASE}
 `;
 
 app.get("/", (_req, res) => {
@@ -93,6 +118,7 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "luz-backend-v5",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
+    wiki_loaded: Boolean(FILLSUN_WIKI_BASE && FILLSUN_WIKI_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
   });
 });
@@ -160,7 +186,8 @@ ${safeMessage}
 
     if (!parsed) {
       parsed = {
-        reply: "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+        reply:
+          "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
         ask_name: false,
         ask_phone: false,
         show_whatsapp: false,
@@ -211,7 +238,12 @@ ${safeMessage}
     });
 
     if (shouldSendLeadAlert) {
-      const alertKey = buildAlertKey({ sessionId: safeSessionId, email: safeEmail, interestTag });
+      const alertKey = buildAlertKey({
+        sessionId: safeSessionId,
+        email: safeEmail,
+        interestTag,
+      });
+
       if (!sentLeadAlerts.has(alertKey)) {
         const sent = await sendLeadAlertEmail({
           email: safeEmail,
@@ -224,6 +256,7 @@ ${safeMessage}
           commercialIntent,
           assistantReply: finalPayload.reply,
         });
+
         if (sent) sentLeadAlerts.add(alertKey);
       }
     }
@@ -232,7 +265,8 @@ ${safeMessage}
   } catch (error) {
     console.error("[LUZ_BACKEND_ERROR]", error);
     return res.status(500).json({
-      reply: "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
+      reply:
+        "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
       ask_name: false,
       ask_phone: false,
       show_whatsapp: true,
@@ -244,20 +278,41 @@ ${safeMessage}
 
 function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
   const text = `${message} ${pageTitle} ${pageUrl}`.toLowerCase();
-  if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) return "termotanques";
-  if (/colector|epdm|pileta|piscina|climatiz/.test(text)) return "colectores";
-  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) return "paneles";
-  if (/showroom/.test(text)) return "showroom";
-  if (/contacto|direccion|direcci[oó]n|ubicaci[oó]n|telefono|tel[eé]fono|mail|correo/.test(text)) return "contacto";
+
+  if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) {
+    return "termotanques";
+  }
+  if (/colector|epdm|pileta|piscina|climatiz/.test(text)) {
+    return "colectores";
+  }
+  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) {
+    return "paneles";
+  }
+  if (/showroom/.test(text)) {
+    return "showroom";
+  }
+  if (/contacto|direccion|direcci[oó]n|ubicaci[oó]n|telefono|tel[eé]fono|mail|correo/.test(text)) {
+    return "contacto";
+  }
+
   return "general";
 }
 
 function detectCommercialIntent(message = "") {
   const text = message.toLowerCase();
-  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link/.test(text);
+  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link/.test(
+    text
+  );
 }
 
-function shouldAskPhone({ modelValue = false, email = "", name = "", phone = "", commercialIntent = false, safeMessagesCount = 0 }) {
+function shouldAskPhone({
+  modelValue = false,
+  email = "",
+  name = "",
+  phone = "",
+  commercialIntent = false,
+  safeMessagesCount = 0,
+}) {
   if (phone) return false;
   if (!email) return false;
   if (!name) return false;
@@ -266,19 +321,46 @@ function shouldAskPhone({ modelValue = false, email = "", name = "", phone = "",
   return false;
 }
 
-function shouldShowWhatsapp({ modelValue = false, commercialIntent = false, safePhone = "", safeMessage = "", safeMessagesCount = 0, askPhoneFinal = false }) {
-  if (/pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|asesor|hablar con una persona/.test(safeMessage.toLowerCase())) return true;
+function shouldShowWhatsapp({
+  modelValue = false,
+  commercialIntent = false,
+  safePhone = "",
+  safeMessage = "",
+  safeMessagesCount = 0,
+  askPhoneFinal = false,
+}) {
+  if (
+    /pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|asesor|hablar con una persona/.test(
+      safeMessage.toLowerCase()
+    )
+  ) {
+    return true;
+  }
   if (commercialIntent && !askPhoneFinal) return true;
   if (safePhone && safeMessagesCount >= 4) return true;
   if (modelValue && safeMessagesCount >= 5 && !askPhoneFinal) return true;
   return false;
 }
 
-function shouldSendAlert({ email = "", phone = "", commercialIntent = false, showWhatsapp = false, message = "" }) {
+function shouldSendAlert({
+  email = "",
+  phone = "",
+  commercialIntent = false,
+  showWhatsapp = false,
+  message = "",
+}) {
   const hasEmail = Boolean(email);
   const hasPhone = Boolean(phone);
   const hasRealQuestion = String(message || "").trim().length >= 8;
-  return hasRealQuestion && ((hasEmail && hasPhone) || (hasEmail && commercialIntent) || (hasEmail && showWhatsapp && commercialIntent));
+
+  return (
+    hasRealQuestion &&
+    (
+      (hasEmail && hasPhone) ||
+      (hasEmail && commercialIntent) ||
+      (hasEmail && showWhatsapp && commercialIntent)
+    )
+  );
 }
 
 function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) {
@@ -286,27 +368,62 @@ function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) 
 }
 
 function isEmailAlertsConfigured() {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.LEAD_ALERT_TO);
+  return Boolean(
+    process.env.SMTP_HOST &&
+    process.env.SMTP_PORT &&
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS &&
+    process.env.LEAD_ALERT_TO
+  );
 }
 
-async function sendLeadAlertEmail({ email = "", name = "", phone = "", pageTitle = "", pageUrl = "", message = "", interestTag = "general", commercialIntent = false, assistantReply = "" }) {
+async function sendLeadAlertEmail({
+  email = "",
+  name = "",
+  phone = "",
+  pageTitle = "",
+  pageUrl = "",
+  message = "",
+  interestTag = "general",
+  commercialIntent = false,
+  assistantReply = "",
+}) {
   if (!isEmailAlertsConfigured()) return false;
+
   try {
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT),
       secure: Number(process.env.SMTP_PORT) === 465,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
     });
+
     const subject = `Nuevo lead desde Luz — ${interestTag}`;
-    const now = new Date().toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" });
+    const now = new Date().toLocaleString("es-AR", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: process.env.LEAD_ALERT_TO,
       replyTo: email || undefined,
       subject,
-      text: `Fecha: ${now}\nInterés: ${interestTag}\nIntención comercial: ${commercialIntent ? "sí" : "no"}\nNombre: ${name || "no informado"}\nEmail: ${email || "no informado"}\nTeléfono: ${phone || "no informado"}\nPágina: ${pageTitle || "sin título"}\nURL: ${pageUrl || "sin URL"}\nConsulta: ${message || "sin mensaje"}\nRespuesta de Luz: ${assistantReply || "sin respuesta"}`,
+      text:
+        `Fecha: ${now}\n` +
+        `Interés: ${interestTag}\n` +
+        `Intención comercial: ${commercialIntent ? "sí" : "no"}\n` +
+        `Nombre: ${name || "no informado"}\n` +
+        `Email: ${email || "no informado"}\n` +
+        `Teléfono: ${phone || "no informado"}\n` +
+        `Página: ${pageTitle || "sin título"}\n` +
+        `URL: ${pageUrl || "sin URL"}\n` +
+        `Consulta: ${message || "sin mensaje"}\n` +
+        `Respuesta de Luz: ${assistantReply || "sin respuesta"}`,
     });
+
     return true;
   } catch (error) {
     console.error("[LUZ_EMAIL_ERROR]", error);
@@ -327,7 +444,9 @@ function safeParseJson(text) {
     try {
       const firstBrace = text.indexOf("{");
       const lastBrace = text.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) return JSON.parse(text.slice(firstBrace, lastBrace + 1));
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        return JSON.parse(text.slice(firstBrace, lastBrace + 1));
+      }
       return null;
     } catch {
       return null;
