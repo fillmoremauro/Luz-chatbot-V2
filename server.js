@@ -57,7 +57,9 @@ RESPUESTA CUANDO LA BASE NO ALCANZA
 "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo."
 
 FORMATO DE SALIDA
-Debés responder SIEMPRE en JSON válido con esta estructura exacta:
+Debés responder SIEMPRE en JSON válido.
+No agregues texto antes ni después del JSON.
+Usá exactamente esta estructura:
 {
   "reply": "texto breve para el usuario",
   "ask_name": false,
@@ -132,11 +134,6 @@ ${safeMessage}
       input: userContext,
       instructions: SYSTEM_PROMPT,
       max_output_tokens: 500,
-      text: {
-        format: {
-          type: "json_object",
-        },
-      },
     });
 
     const rawText = response.output_text || "{}";
