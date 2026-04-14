@@ -70,6 +70,13 @@ REGLAS OBLIGATORIAS
 - No uses tono exageradamente vendedor.
 - Priorizá ayudar, orientar y ordenar la consulta.
 
+REGLAS MUY IMPORTANTES SOBRE WHATSAPP
+- NO muestres WhatsApp en cada respuesta.
+- Para consultas informativas normales, show_whatsapp debe ser false.
+- show_whatsapp solo debe ser true si el usuario pide precio, presupuesto, instalación, disponibilidad, stock, asesor, visita, compra, o si claramente ya corresponde pasar a un humano.
+- Si la conversación sigue siendo orientativa o educativa, show_whatsapp debe seguir en false.
+- No repitas derivación a WhatsApp en respuestas consecutivas si no hace falta.
+
 RESPUESTA CUANDO LA BASE NO ALCANZA
 "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo."
 
@@ -95,8 +102,8 @@ REGLAS PARA ask_phone
 - false en cualquier otro caso.
 
 REGLAS PARA show_whatsapp
-- true cuando convenga derivar a WhatsApp.
-- false cuando todavía no haga falta.
+- true solo si realmente conviene derivar.
+- false en consultas informativas normales.
 
 BASE DE CONOCIMIENTO FILLSUN
 ${FILLSUN_KNOWLEDGE_BASE}
@@ -109,7 +116,7 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "luz-backend-v3",
+    service: "luz-backend-v4",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
   });
@@ -125,6 +132,8 @@ app.post("/api/chat", async (req, res) => {
       pageUrl = "",
       pageTitle = "",
       conversationId = "",
+      sessionId = "",
+      messagesCount = 0,
     } = req.body || {};
 
     if (!message || typeof message !== "string") {
@@ -138,6 +147,8 @@ app.post("/api/chat", async (req, res) => {
     const safePageUrl = String(pageUrl || "").trim();
     const safePageTitle = String(pageTitle || "").trim();
     const safeConversationId = String(conversationId || "").trim();
+    const safeSessionId = String(sessionId || "").trim();
+    const safeMessagesCount = Number(messagesCount || 0);
 
     const interestTag = detectInterestTag(safeMessage, safePageTitle, safePageUrl);
     const commercialIntent = detectCommercialIntent(safeMessage);
@@ -155,6 +166,7 @@ DATOS ACTUALES DEL USUARIO
 - URL actual: ${safePageUrl || "sin URL"}
 - Interés detectado: ${interestTag}
 - Intención comercial detectada: ${commercialIntent ? "sí" : "no"}
+- Cantidad de mensajes del usuario hasta ahora: ${safeMessagesCount}
 
 MENSAJE DEL USUARIO
 ${safeMessage}
@@ -167,6 +179,7 @@ ${safeMessage}
       pageTitle: safePageTitle || "sin titulo",
       interestTag,
       commercialIntent,
+      messagesCount: safeMessagesCount,
       message: safeMessage,
     });
 
@@ -199,12 +212,19 @@ ${safeMessage}
           : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
       ask_name: Boolean(parsed.ask_name),
       ask_phone: Boolean(parsed.ask_phone),
-      show_whatsapp: Boolean(parsed.show_whatsapp),
+      show_whatsapp: shouldShowWhatsapp({
+        modelValue: Boolean(parsed.show_whatsapp),
+        commercialIntent,
+        safePhone,
+        safeMessage,
+        safeMessagesCount,
+      }),
       whatsapp_text:
         typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
           ? parsed.whatsapp_text.trim()
           : buildWhatsappText({ name: safeName, message: safeMessage }),
       conversationId: response.id,
+      interest_tag: interestTag,
     };
 
     const shouldSendLeadAlert = shouldSendAlert({
@@ -217,7 +237,7 @@ ${safeMessage}
 
     if (shouldSendLeadAlert) {
       const alertKey = buildAlertKey({
-        conversationId: response.id,
+        sessionId: safeSessionId,
         email: safeEmail,
         interestTag,
       });
@@ -273,21 +293,35 @@ function detectCommercialIntent(message = "") {
   return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad/.test(text);
 }
 
+function shouldShowWhatsapp({ modelValue = false, commercialIntent = false, safePhone = "", safeMessage = "", safeMessagesCount = 0 }) {
+  if (!modelValue) return false;
+  if (commercialIntent) return true;
+  if (safePhone) return true;
+  if (/whatsapp|asesor|hablar con alguien|presupuesto|precio|cotizaci[oó]n|instalaci[oó]n|comprar|stock|disponibilidad|visitar/.test(safeMessage.toLowerCase())) {
+    return true;
+  }
+  if (safeMessagesCount >= 5 && /no tengo esa información confirmada|seguir por whatsapp/.test(safeMessage.toLowerCase())) {
+    return true;
+  }
+  return false;
+}
+
 function shouldSendAlert({ email = "", phone = "", commercialIntent = false, showWhatsapp = false, message = "" }) {
   const hasEmail = Boolean(email);
   const hasPhone = Boolean(phone);
   const hasRealQuestion = String(message || "").trim().length >= 8;
 
   return hasRealQuestion && (
-    (hasEmail && commercialIntent) ||
-    (hasEmail && showWhatsapp) ||
     (hasEmail && hasPhone) ||
-    (hasEmail && /quiero|necesito|busco|me interesa/.test(message.toLowerCase()))
+    (hasEmail && commercialIntent) ||
+    (hasEmail && showWhatsapp && commercialIntent)
   );
 }
 
-function buildAlertKey({ conversationId = "", email = "", interestTag = "general" }) {
-  return `${conversationId || "sin_conversacion"}__${email || "sin_email"}__${interestTag}`;
+function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) {
+  const sessionPart = sessionId || "sin_sesion";
+  const emailPart = email || "sin_email";
+  return `${sessionPart}__${emailPart}__${interestTag}`;
 }
 
 function isEmailAlertsConfigured() {
