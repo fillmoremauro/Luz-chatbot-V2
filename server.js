@@ -116,10 +116,11 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "luz-backend-v5",
+    service: "luz-backend-v6",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
     wiki_loaded: Boolean(FILLSUN_WIKI_BASE && FILLSUN_WIKI_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
+    brevo_enabled: isBrevoConfigured(),
   });
 });
 
@@ -228,6 +229,25 @@ ${safeMessage}
       conversationId: response.id,
       interest_tag: interestTag,
     };
+
+    const shouldSyncBrevo =
+      Boolean(safeEmail) &&
+      (
+        commercialIntent ||
+        Boolean(safePhone) ||
+        safeMessagesCount >= 2
+      );
+
+    if (shouldSyncBrevo) {
+      await upsertBrevoContact({
+        email: safeEmail,
+        name: safeName,
+        phone: safePhone,
+        interestTag,
+        pageTitle: safePageTitle,
+        pageUrl: safePageUrl,
+      });
+    }
 
     const shouldSendLeadAlert = shouldSendAlert({
       email: safeEmail,
@@ -375,6 +395,91 @@ function isEmailAlertsConfigured() {
     process.env.SMTP_PASS &&
     process.env.LEAD_ALERT_TO
   );
+}
+
+function isBrevoConfigured() {
+  return Boolean(process.env.BREVO_API_KEY && process.env.BREVO_LIST_ID);
+}
+
+function normalizePhoneForBrevo(phone = "") {
+  const raw = String(phone || "").trim();
+  if (!raw) return "";
+
+  let cleaned = raw.replace(/[^\d+]/g, "");
+
+  if (cleaned.startsWith("00")) {
+    cleaned = `+${cleaned.slice(2)}`;
+  }
+
+  if (cleaned.startsWith("+")) return cleaned;
+  if (cleaned.startsWith("54")) return `+${cleaned}`;
+
+  if (cleaned.startsWith("0")) {
+    cleaned = cleaned.slice(1);
+  }
+
+  if (cleaned.startsWith("11")) {
+    return `+549${cleaned}`;
+  }
+
+  return `+54${cleaned}`;
+}
+
+async function upsertBrevoContact({
+  email = "",
+  name = "",
+  phone = "",
+  interestTag = "general",
+  pageTitle = "",
+  pageUrl = "",
+}) {
+  if (!isBrevoConfigured()) return false;
+  if (!email) return false;
+
+  try {
+    const attributes = {
+      INTERES: interestTag || "general",
+      ORIGEN: "Luz",
+      ULTIMA_PAGINA: pageTitle || pageUrl || "",
+    };
+
+    if (name) {
+      attributes.FNAME = name;
+    }
+
+    const normalizedPhone = normalizePhoneForBrevo(phone);
+    if (normalizedPhone) {
+      attributes.SMS = normalizedPhone;
+    }
+
+    const payload = {
+      email,
+      attributes,
+      listIds: [Number(process.env.BREVO_LIST_ID)],
+      updateEnabled: true,
+    };
+
+    const response = await fetch("https://api.brevo.com/v3/contacts", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "api-key": process.env.BREVO_API_KEY,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("[LUZ_BREVO_ERROR]", response.status, errorText);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("[LUZ_BREVO_ERROR]", error);
+    return false;
+  }
 }
 
 async function sendLeadAlertEmail({
