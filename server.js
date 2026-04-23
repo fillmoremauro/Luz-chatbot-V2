@@ -44,69 +44,36 @@ const FILLSUN_WIKI_BASE = await loadTextFile(
   ``
 );
 
-const SYSTEM_PROMPT = `
+const BASE_SYSTEM_PROMPT = `
 Sos Luz, asistente virtual de FILLSUN.
 
-Tu función es ayudar a potenciales clientes usando únicamente información confirmada en la base de conocimiento incluida más abajo.
+OBJETIVO
+- Ayudar con dudas generales sobre soluciones solares de FILLSUN.
+- Responder breve, claro y útil.
+- No sonar enciclopédica.
+- No inventar información.
+- Orientar primero. Derivar después.
 
-OBJETIVOS
-1. Responder dudas generales sobre soluciones solares de FILLSUN.
-2. Mantener respuestas breves, claras, profesionales y naturales, con tono argentino neutro.
-3. No inventar información.
-4. Pedir nombre de forma sutil más adelante si todavía no lo tenés.
-5. Pedir teléfono solo cuando haya intención comercial real o cuando el usuario ya esté en una etapa útil para avanzar.
-6. Llevar la conversación a WhatsApp cuando la consulta requiera cierre, presupuesto, confirmación técnica específica, disponibilidad o seguimiento humano.
+REGLAS
+- Respondé solo con información confirmada en la base incluida.
+- No prometas stock, precio final, plazos, instalación, disponibilidad ni compatibilidades exactas.
+- No recomiendes modelos exactos sin derivación.
+- Si falta certeza, decilo con honestidad.
+- Si la consulta es comercial, WhatsApp puede mostrarse.
+- Si el usuario ya está listo para avanzar, WhatsApp puede mostrarse aunque también se pida teléfono.
+- No metas en el "reply" pedidos de teléfono largos o repetidos.
+- Si está en una calculadora y la consulta encaja, priorizá invitar a usar esa calculadora.
+- El tono debe ser profesional, cercano y natural, en español neutro de Argentina.
 
-REGLAS OBLIGATORIAS
-- Nunca inventes datos.
-- Nunca respondas usando conocimiento general si no está confirmado abajo.
-- Nunca ofrezcas productos no publicados o no confirmados.
-- Si no encontrás una respuesta confiable, decilo con honestidad.
-- No seas invasiva al pedir datos.
-- No hagas preguntas innecesarias.
-- No des respuestas largas.
-- No uses tono exageradamente vendedor.
-- Priorizá ayudar, orientar y ordenar la consulta.
-
-REGLAS MUY IMPORTANTES SOBRE LA WIKI
-- La wiki es apoyo educativo general.
-- Usala solo para explicar conceptos simples y frecuentes.
-- No conviertas la respuesta en una explicación larga o enciclopédica.
-- Si la consulta requiere precisión comercial o técnica fina, derivá cuando corresponda.
-- Priorizá siempre el universo FILLSUN.
-
-REGLAS MUY IMPORTANTES SOBRE WHATSAPP
-- NO muestres WhatsApp en cada respuesta.
-- Para consultas informativas normales, show_whatsapp debe ser false.
-- show_whatsapp solo debe ser true si el usuario pide precio, presupuesto, instalación, disponibilidad, stock, asesor, visita, compra, contacto humano, o si claramente ya corresponde pasar a un humano.
-- Si la conversación sigue siendo orientativa o educativa, show_whatsapp debe seguir en false.
-
-REGLAS MUY IMPORTANTES SOBRE ask_phone
-- ask_phone debe ser true si el usuario ya dio email y nombre, y además:
-  a) pide precio, presupuesto, instalación, stock, disponibilidad o asesor, o
-  b) ya hizo varias preguntas útiles y parece interesado en avanzar.
-- No hace falta esperar a que el usuario lo pida explícitamente.
-
-FORMATO DE SALIDA
-Debés responder SIEMPRE en JSON válido.
-No agregues texto antes ni después del JSON.
-Usá exactamente esta estructura:
+SALIDA
+Respondé SIEMPRE en JSON válido y nada más:
 {
-  "reply": "texto breve para el usuario",
+  "reply": "texto para el usuario",
   "ask_name": false,
   "ask_phone": false,
   "show_whatsapp": false,
   "whatsapp_text": "mensaje corto para WhatsApp"
 }
-
-BASE OPERATIVA FILLSUN
-${FILLSUN_KNOWLEDGE_BASE}
-
-WIKI SOLAR COMPLEMENTARIA
-Usala solo para responder dudas generales y educativas, de forma breve y clara.
-No la uses para inventar precios, stock, modelos exactos, plazos ni compatibilidades puntuales.
-
-${FILLSUN_WIKI_BASE}
 `;
 
 app.get("/", (_req, res) => {
@@ -116,7 +83,7 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "luz-backend-v6",
+    service: "luz-backend-v7",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
     wiki_loaded: Boolean(FILLSUN_WIKI_BASE && FILLSUN_WIKI_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
@@ -154,81 +121,110 @@ app.post("/api/chat", async (req, res) => {
 
     const interestTag = detectInterestTag(safeMessage, safePageTitle, safePageUrl);
     const commercialIntent = detectCommercialIntent(safeMessage);
+    const calculatorPage = isCalculatorPage(safePageTitle, safePageUrl);
+    const calculatorIntent = detectCalculatorIntent(safeMessage);
 
-    const userContext = `
+    let finalPayload;
+
+    if (calculatorPage && calculatorIntent && !commercialIntent) {
+      finalPayload = {
+        reply: buildCalculatorReply({ message: safeMessage, interestTag }),
+        ask_name: false,
+        ask_phone: false,
+        show_whatsapp: false,
+        whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
+        conversationId: safeConversationId || "",
+        interest_tag: interestTag,
+      };
+    } else {
+      const selectedWiki = pickRelevantWikiSections(FILLSUN_WIKI_BASE, interestTag);
+
+      const instructions = `
+${BASE_SYSTEM_PROMPT}
+
+BASE OPERATIVA FILLSUN
+${FILLSUN_KNOWLEDGE_BASE}
+
+WIKI COMPLEMENTARIA RELEVANTE
+${selectedWiki}
+`;
+
+      const userContext = `
 IMPORTANTE: devolvé la respuesta en formato json válido.
 Usá exactamente estas claves:
 reply, ask_name, ask_phone, show_whatsapp, whatsapp_text.
 
-DATOS ACTUALES DEL USUARIO
+CONTEXTO DEL USUARIO
 - Email: ${safeEmail || "no informado"}
 - Nombre: ${safeName || "no informado"}
 - Teléfono: ${safePhone || "no informado"}
 - Página actual: ${safePageTitle || "sin título"}
 - URL actual: ${safePageUrl || "sin URL"}
 - Interés detectado: ${interestTag}
-- Intención comercial detectada: ${commercialIntent ? "sí" : "no"}
-- Cantidad de mensajes del usuario hasta ahora: ${safeMessagesCount}
+- Intención comercial: ${commercialIntent ? "sí" : "no"}
+- Está en calculadoras: ${calculatorPage ? "sí" : "no"}
+- Cantidad de mensajes previos: ${safeMessagesCount}
 
 MENSAJE DEL USUARIO
 ${safeMessage}
 `;
 
-    const response = await client.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
-      previous_response_id: safeConversationId || undefined,
-      input: userContext,
-      instructions: SYSTEM_PROMPT,
-      max_output_tokens: 500,
-    });
+      const response = await client.responses.create({
+        model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
+        previous_response_id: safeConversationId || undefined,
+        input: userContext,
+        instructions,
+        max_output_tokens: 260,
+      });
 
-    const rawText = response.output_text || "{}";
-    let parsed = safeParseJson(rawText);
+      const rawText = response.output_text || "{}";
+      let parsed = safeParseJson(rawText);
 
-    if (!parsed) {
-      parsed = {
-        reply:
-          "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
-        ask_name: false,
-        ask_phone: false,
-        show_whatsapp: false,
-        whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
+      if (!parsed) {
+        parsed = {
+          reply:
+            "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
+          ask_name: false,
+          ask_phone: false,
+          show_whatsapp: false,
+          whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
+        };
+      }
+
+      const askPhoneFinal = shouldAskPhone({
+        modelValue: Boolean(parsed.ask_phone),
+        email: safeEmail,
+        name: safeName,
+        phone: safePhone,
+        commercialIntent,
+        safeMessagesCount,
+      });
+
+      const showWhatsappFinal = shouldShowWhatsapp({
+        modelValue: Boolean(parsed.show_whatsapp),
+        commercialIntent,
+        safePhone,
+        safeMessage,
+        safeMessagesCount,
+      });
+
+      finalPayload = {
+        reply: sanitizeReply(
+          typeof parsed.reply === "string" && parsed.reply.trim()
+            ? parsed.reply.trim()
+            : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo."
+        ),
+        ask_name: Boolean(parsed.ask_name),
+        ask_phone: askPhoneFinal,
+        show_whatsapp: showWhatsappFinal,
+        whatsapp_text:
+          typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
+            ? parsed.whatsapp_text.trim()
+            : buildWhatsappText({ name: safeName, message: safeMessage }),
+        conversationId: response.id,
+        interest_tag: interestTag,
       };
     }
-
-    const askPhoneFinal = shouldAskPhone({
-      modelValue: Boolean(parsed.ask_phone),
-      email: safeEmail,
-      name: safeName,
-      phone: safePhone,
-      commercialIntent,
-      safeMessagesCount,
-    });
-
-    const showWhatsappFinal = shouldShowWhatsapp({
-      modelValue: Boolean(parsed.show_whatsapp),
-      commercialIntent,
-      safePhone,
-      safeMessage,
-      safeMessagesCount,
-      askPhoneFinal,
-    });
-
-    const finalPayload = {
-      reply:
-        typeof parsed.reply === "string" && parsed.reply.trim()
-          ? parsed.reply.trim()
-          : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
-      ask_name: Boolean(parsed.ask_name),
-      ask_phone: askPhoneFinal,
-      show_whatsapp: showWhatsappFinal,
-      whatsapp_text:
-        typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
-          ? parsed.whatsapp_text.trim()
-          : buildWhatsappText({ name: safeName, message: safeMessage }),
-      conversationId: response.id,
-      interest_tag: interestTag,
-    };
 
     const shouldSyncBrevo =
       Boolean(safeEmail) &&
@@ -299,30 +295,54 @@ ${safeMessage}
 function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
   const text = `${message} ${pageTitle} ${pageUrl}`.toLowerCase();
 
-  if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) {
-    return "termotanques";
-  }
-  if (/colector|epdm|pileta|piscina|climatiz/.test(text)) {
-    return "colectores";
-  }
-  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) {
-    return "paneles";
-  }
-  if (/showroom/.test(text)) {
-    return "showroom";
-  }
-  if (/contacto|direccion|direcci[oó]n|ubicaci[oó]n|telefono|tel[eé]fono|mail|correo/.test(text)) {
-    return "contacto";
-  }
+  if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) return "termotanques";
+  if (/colector|epdm|pileta|piscina|climatiz/.test(text)) return "colectores";
+  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) return "paneles";
+  if (/showroom/.test(text)) return "showroom";
+  if (/contacto|direccion|direcci[oó]n|ubicaci[oó]n|telefono|tel[eé]fono|mail|correo/.test(text)) return "contacto";
 
   return "general";
 }
 
 function detectCommercialIntent(message = "") {
-  const text = message.toLowerCase();
-  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link/.test(
+  const text = String(message || "").toLowerCase();
+  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|quiero comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link|pasame/.test(
     text
   );
+}
+
+function isCalculatorPage(pageTitle = "", pageUrl = "") {
+  const text = `${pageTitle} ${pageUrl}`.toLowerCase();
+  return /calculadora|calculadoras|calcular|dimensionamiento|ahorro/.test(text);
+}
+
+function detectCalculatorIntent(message = "") {
+  const text = String(message || "").toLowerCase();
+  return /cu[aá]ntos|cu[aá]nto|cu[aá]l necesito|me conviene|dimensionar|consumo|ahorro|paneles necesito|termotanque necesito|sirve para mi casa|para mi casa/.test(
+    text
+  );
+}
+
+function buildCalculatorReply({ message = "", interestTag = "general" }) {
+  const text = String(message || "").toLowerCase();
+
+  if (interestTag === "paneles") {
+    return "Eso depende del consumo que quieras cubrir y del tipo de sistema. En esta misma página podés usar la calculadora para estimarlo. Si querés, después te ayudo a interpretar el resultado.";
+  }
+
+  if (interestTag === "termotanques") {
+    return "Para estimar qué equipo puede servirte, conviene mirar cantidad de personas y nivel de uso de agua caliente. Si estás en la calculadora, podés usarla como referencia inicial y después te ayudo a seguir.";
+  }
+
+  if (interestTag === "colectores") {
+    return "Para orientarlo bien hay que mirar medidas de la pileta y objetivo de uso. Si estás en la calculadora, usala como referencia inicial y después seguimos con lo que te dé.";
+  }
+
+  if (/ahorro/.test(text)) {
+    return "El ahorro depende del consumo y del sistema que quieras evaluar. En esta misma página podés usar la calculadora para hacer una estimación inicial.";
+  }
+
+  return "En esta página podés usar la calculadora para hacer una estimación inicial. Si querés, después te ayudo a interpretar el resultado.";
 }
 
 function shouldAskPhone({
@@ -347,18 +367,17 @@ function shouldShowWhatsapp({
   safePhone = "",
   safeMessage = "",
   safeMessagesCount = 0,
-  askPhoneFinal = false,
 }) {
-  if (
-    /pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|asesor|hablar con una persona/.test(
-      safeMessage.toLowerCase()
-    )
-  ) {
+  const text = String(safeMessage || "").toLowerCase();
+
+  if (/pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|quiero hablar con una persona|asesor|hablar con una persona|hablar con alguien/.test(text)) {
     return true;
   }
-  if (commercialIntent && !askPhoneFinal) return true;
-  if (safePhone && safeMessagesCount >= 4) return true;
-  if (modelValue && safeMessagesCount >= 5 && !askPhoneFinal) return true;
+
+  if (commercialIntent) return true;
+  if (safePhone && safeMessagesCount >= 3) return true;
+  if (modelValue && safeMessagesCount >= 5) return true;
+
   return false;
 }
 
@@ -407,20 +426,12 @@ function normalizePhoneForBrevo(phone = "") {
 
   let cleaned = raw.replace(/[^\d+]/g, "");
 
-  if (cleaned.startsWith("00")) {
-    cleaned = `+${cleaned.slice(2)}`;
-  }
-
+  if (cleaned.startsWith("00")) cleaned = `+${cleaned.slice(2)}`;
   if (cleaned.startsWith("+")) return cleaned;
   if (cleaned.startsWith("54")) return `+${cleaned}`;
 
-  if (cleaned.startsWith("0")) {
-    cleaned = cleaned.slice(1);
-  }
-
-  if (cleaned.startsWith("11")) {
-    return `+549${cleaned}`;
-  }
+  if (cleaned.startsWith("0")) cleaned = cleaned.slice(1);
+  if (cleaned.startsWith("11")) return `+549${cleaned}`;
 
   return `+54${cleaned}`;
 }
@@ -443,14 +454,10 @@ async function upsertBrevoContact({
       ULTIMA_PAGINA: pageTitle || pageUrl || "",
     };
 
-    if (name) {
-      attributes.FNAME = name;
-    }
+    if (name) attributes.FNAME = name;
 
     const normalizedPhone = normalizePhoneForBrevo(phone);
-    if (normalizedPhone) {
-      attributes.SMS = normalizedPhone;
-    }
+    if (normalizedPhone) attributes.SMS = normalizedPhone;
 
     const payload = {
       email,
@@ -542,6 +549,28 @@ function buildWhatsappText({ name = "", message = "" }) {
   return `Hola FILLSUN, ${introName}ya hablé con Luz y quiero seguir mi consulta.${topic}`.trim();
 }
 
+function sanitizeReply(text = "") {
+  let clean = String(text || "").trim();
+
+  clean = clean.replace(
+    /si quer[eé]s,?\s*(tambi[eé]n\s*)?pod[eé]s dejarme un tel[eé]fono[^.?!]*[.?!]?/gi,
+    ""
+  );
+
+  clean = clean.replace(
+    /dejame tu tel[eé]fono[^.?!]*[.?!]?/gi,
+    ""
+  );
+
+  clean = clean.replace(/\n{3,}/g, "\n\n").trim();
+
+  if (!clean) {
+    return "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.";
+  }
+
+  return clean;
+}
+
 function safeParseJson(text) {
   try {
     return JSON.parse(text);
@@ -557,6 +586,39 @@ function safeParseJson(text) {
       return null;
     }
   }
+}
+
+function pickRelevantWikiSections(markdown = "", interestTag = "general") {
+  if (!markdown) return "";
+
+  const sections = splitMarkdownSections(markdown);
+
+  const keywordMap = {
+    termotanques: ["termotanque", "heat pipe", "presurizado", "agua caliente"],
+    colectores: ["colector", "epdm", "piscina", "pileta", "climatización"],
+    paneles: ["panel", "fotovolta", "inversor", "batería", "on grid", "off grid", "híbrido"],
+    showroom: ["showroom"],
+    contacto: ["contacto", "buenos aires", "argentina"],
+    general: ["energía solar", "argentina", "buenos aires", "mantenimiento"],
+  };
+
+  const keywords = keywordMap[interestTag] || keywordMap.general;
+
+  const matches = sections.filter((section) => {
+    const text = section.toLowerCase();
+    return keywords.some((kw) => text.includes(kw));
+  });
+
+  const selected = matches.slice(0, 3);
+  return selected.length ? selected.join("\n\n") : sections.slice(0, 2).join("\n\n");
+}
+
+function splitMarkdownSections(markdown = "") {
+  const normalized = String(markdown || "").trim();
+  if (!normalized) return [];
+
+  const parts = normalized.split(/\n(?=##\s)/g).map((part) => part.trim()).filter(Boolean);
+  return parts;
 }
 
 app.listen(PORT, () => {
