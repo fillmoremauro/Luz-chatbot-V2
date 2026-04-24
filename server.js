@@ -301,15 +301,34 @@ function analyzeRouting({
   const calculatorPage = isCalculatorPage(pageTitle, pageUrl);
   const calculatorIntent = detectCalculatorIntent(message);
   const commercialIntent = detectCommercialIntent(message);
-  const explicitWhatsappIntent = /whatsapp|asesor|persona|humano|hablar con alguien|hablar con una persona|contacto directo|pasame tu n[uú]mero|n[uú]mero de contacto/i.test(joined);
   const infoIntent = detectInformationalIntent(message);
-  const closingIntent = /quiero comprar|quiero instalar|quiero cotizar|necesito presupuesto|presupuesto|cotizaci[oó]n|visita|coordinar|hablar con ventas|comprar/i.test(joined);
+
+  const explicitWhatsappIntent =
+    /whatsapp|asesor|persona|humano|hablar con alguien|hablar con una persona|contacto directo|pasame tu n[uú]mero|n[uú]mero de contacto/i.test(joined);
+
+  const closingIntent =
+    /quiero comprar|quiero instalar|quiero cotizar|necesito presupuesto|presupuesto|cotizaci[oó]n|coordinar|visita|hablar con ventas|comprar/i.test(joined);
+
+  const softAck =
+    /^(si|sí|ok|dale|perfecto|entiendo|gracias|joya|bien)$/i.test(String(message || "").trim());
+
+  const thermalSignals = detectThermalQualificationSignals(message);
+  const thermalSignalCount = Object.values(thermalSignals).filter(Boolean).length;
 
   let stage = "inform";
 
   if (closingIntent || explicitWhatsappIntent) {
     stage = "close";
-  } else if (commercialIntent || (hasPhone && messagesCount >= 2)) {
+  } else if (
+    interestTag === "termotanques" &&
+    (
+      (messagesCount >= 4 && thermalSignalCount >= 2) ||
+      (messagesCount >= 6 && thermalSignalCount >= 1) ||
+      (messagesCount >= 7 && softAck)
+    )
+  ) {
+    stage = "commercial";
+  } else if (commercialIntent) {
     stage = "commercial";
   } else if (calculatorIntent) {
     stage = "calculator";
@@ -334,6 +353,9 @@ function analyzeRouting({
     hasPhone,
     hasEmail,
     hasName,
+    thermalSignals,
+    thermalSignalCount,
+    softAck,
   };
 }
 
@@ -351,7 +373,7 @@ function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
 
 function detectInformationalIntent(message = "") {
   const text = String(message || "").toLowerCase();
-  return /(que es|qué es|como funciona|cómo funciona|sirve|conviene|diferencia|ventaja|beneficio|para qué|para que|funciona en invierno|mantenimiento|duraci[oó]n|cu[aá]l es la diferencia|explicame|explicame|informaci[oó]n)/.test(text);
+  return /(que es|qué es|como funciona|cómo funciona|sirve|conviene|diferencia|ventaja|beneficio|para qué|para que|funciona en invierno|mantenimiento|duraci[oó]n|cu[aá]l es la diferencia|explicame|explícame|informaci[oó]n)/.test(text);
 }
 
 function detectCommercialIntent(message = "") {
@@ -367,6 +389,21 @@ function isCalculatorPage(pageTitle = "", pageUrl = "") {
 function detectCalculatorIntent(message = "") {
   const text = String(message || "").toLowerCase();
   return /(cu[aá]ntos|cu[aá]nto|cu[aá]l necesito|me conviene para mi casa|para cu[aá]ntas personas|para cuantas personas|dimensionar|dimensionamiento|consumo|ahorro|paneles necesito|termotanque necesito|sirve para mi casa|para mi casa|qué equipo me conviene|que equipo me conviene|qué capacidad|que capacidad|cuánta superficie|cuanta superficie)/.test(text);
+}
+
+function detectThermalQualificationSignals(message = "") {
+  const text = String(message || "").toLowerCase();
+
+  return {
+    people:
+      /\b(somos|somos\s+\d+|para\s+\d+|(\d+)\s*personas?)\b/.test(text),
+    roof:
+      /techo plano|techo inclinado|losa|chapa|teja|es plano|es inclinado/.test(text),
+    sun:
+      /buen sol|sol directo|mucho sol|recibe sol|sol gran parte del d[ií]a|sin sombras|no hay sombras/.test(text),
+    space:
+      /tengo espacio|hay espacio|espacio libre|pa[nñ]o libre|lugar libre/.test(text),
+  };
 }
 
 function finalizeReply({ rawReply = "", routing, safeMessage = "" }) {
@@ -385,6 +422,7 @@ function finalizeReply({ rawReply = "", routing, safeMessage = "" }) {
   }
 
   if (routing.stage === "commercial" || routing.stage === "close") {
+    clean = enrichCommercialReply(clean, routing);
     clean = keepCommercialReplyTight(clean);
   }
 
@@ -397,14 +435,17 @@ function fallbackReplyForStage(routing, message = "") {
   }
 
   if (routing.stage === "calculator") {
-    return softenIntoCalculator("Para orientarlo bien conviene estimarlo con una referencia inicial.", routing.interestTag);
+    return softenIntoCalculator("Para orientarlo bien conviene hacer primero una estimación inicial.", routing.interestTag);
   }
 
   if (routing.stage === "commercial" || routing.stage === "close") {
-    return "Puedo orientarte por acá, pero en este punto ya conviene seguirlo directo con el equipo para verlo bien según tu caso.";
+    if (routing.interestTag === "termotanques") {
+      return "Con lo que me contaste, ya hay una base bastante clara para pasar al siguiente paso y confirmar bien qué equipo te conviene.";
+    }
+    return "En este punto ya conviene seguirlo directo con el equipo para verlo bien según tu caso.";
   }
 
-  return "Te ayudo con eso. Contame un poco más del uso que querés darle y te oriento con una respuesta más concreta.";
+  return "Te ayudo con eso. Contame un poco más del uso que querés darle y te oriento mejor.";
 }
 
 function softenIntoCalculator(text = "", interestTag = "general") {
@@ -444,6 +485,23 @@ function replyForCalculatorPage(interestTag = "general", current = "") {
   return `${clean} ${map[interestTag] || map.general}`.trim();
 }
 
+function enrichCommercialReply(text = "", routing = {}) {
+  let clean = stripCtaMentions(text).trim();
+
+  if (routing.interestTag === "termotanques") {
+    if (!/con lo que me contaste|ya hay una base|ya tiene sentido|ya conviene/i.test(clean)) {
+      clean += " Con lo que me contaste, ya hay una base bastante clara para verlo bien con el equipo y confirmar capacidad e instalación.";
+    }
+    return clean.trim();
+  }
+
+  if (!/ya conviene|seguirlo con el equipo|verlo bien con el equipo/i.test(clean)) {
+    clean += " En este punto ya conviene verlo bien con el equipo según tu caso.";
+  }
+
+  return clean.trim();
+}
+
 function keepCommercialReplyTight(text = "") {
   let clean = stripCtaMentions(text);
   clean = clean.replace(/\s{2,}/g, " ").trim();
@@ -456,6 +514,25 @@ function keepCommercialReplyTight(text = "") {
 }
 
 function buildCTA({ routing, safeName = "", safeMessage = "", modelWhatsappText = "" }) {
+  const whatsappText =
+    modelWhatsappText?.trim() || buildWhatsappText({ name: safeName, message: safeMessage });
+
+  if (routing.stage === "close" || routing.explicitWhatsappIntent) {
+    return {
+      type: "whatsapp",
+      label: "Seguir por WhatsApp",
+      url: buildWhatsappUrl(whatsappText),
+    };
+  }
+
+  if (routing.stage === "commercial") {
+    return {
+      type: "whatsapp",
+      label: "Consultar por WhatsApp",
+      url: buildWhatsappUrl(whatsappText),
+    };
+  }
+
   if (routing.stage === "calculator" && !routing.calculatorPage) {
     return {
       type: "calculator",
@@ -464,33 +541,14 @@ function buildCTA({ routing, safeName = "", safeMessage = "", modelWhatsappText 
     };
   }
 
-  if (routing.stage === "close" || routing.explicitWhatsappIntent) {
-    const text = modelWhatsappText?.trim() || buildWhatsappText({ name: safeName, message: safeMessage });
-    return {
-      type: "whatsapp",
-      label: "Seguir por WhatsApp",
-      url: buildWhatsappUrl(text),
-    };
-  }
-
-  if (routing.stage === "commercial" && routing.messagesCount >= 1) {
-    const text = modelWhatsappText?.trim() || buildWhatsappText({ name: safeName, message: safeMessage });
-    return {
-      type: "whatsapp",
-      label: "Consultar por WhatsApp",
-      url: buildWhatsappUrl(text),
-    };
-  }
-
   return { type: "none", label: "", url: "" };
 }
-
 function shouldAskPhone({ routing, safeEmail = "", safeName = "", safePhone = "", modelValue = false }) {
   if (safePhone) return false;
   if (!safeEmail || !safeName) return false;
 
   if (routing.stage === "close") return true;
-  if (routing.stage === "commercial" && routing.messagesCount >= 2) return true;
+  if (routing.stage === "commercial") return true;
   if (modelValue && routing.messagesCount >= 4) return true;
 
   return false;
