@@ -19,6 +19,8 @@ const __dirname = path.dirname(__filename);
 
 const KNOWLEDGE_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_base.md");
 const WIKI_FILE_PATH = path.join(__dirname, "knowledge", "fillsun_wiki.md");
+const CALCULATORS_URL = "https://energia-solar.com.ar/calculadoras/";
+const WHATSAPP_NUMBER = "5491133480020";
 const sentLeadAlerts = new Set();
 
 async function loadTextFile(filePath, label, fallback = "") {
@@ -35,35 +37,39 @@ async function loadTextFile(filePath, label, fallback = "") {
 const FILLSUN_KNOWLEDGE_BASE = await loadTextFile(
   KNOWLEDGE_FILE_PATH,
   "fillsun_base.md",
-  `FILLSUN trabaja con soluciones de energía solar en Argentina. Si falta información, derivar a WhatsApp.`
+  "FILLSUN trabaja con soluciones de energía solar en Argentina. Si falta información, decirlo con honestidad y orientar sin inventar."
 );
 
-const FILLSUN_WIKI_BASE = await loadTextFile(
-  WIKI_FILE_PATH,
-  "fillsun_wiki.md",
-  ``
-);
+const FILLSUN_WIKI_BASE = await loadTextFile(WIKI_FILE_PATH, "fillsun_wiki.md", "");
 
 const BASE_SYSTEM_PROMPT = `
 Sos Luz, asistente virtual de FILLSUN.
 
-OBJETIVO
-- Ayudar con dudas generales sobre soluciones solares de FILLSUN.
-- Responder breve, claro y útil.
-- No sonar enciclopédica.
-- No inventar información.
-- Orientar primero. Derivar después.
+FORMA DE RESPONDER
+- Español natural de Argentina.
+- Respuestas cortas: normalmente entre 1 y 4 frases.
+- Útil de verdad, cero tono robótico.
+- No sonar enciclopédica ni recitar texto largo.
+- No decir solo “depende”; si depende, explicá de qué depende y cuál sería el siguiente paso lógico.
 
-REGLAS
-- Respondé solo con información confirmada en la base incluida.
-- No prometas stock, precio final, plazos, instalación, disponibilidad ni compatibilidades exactas.
-- No recomiendes modelos exactos sin derivación.
-- Si falta certeza, decilo con honestidad.
-- Si la consulta es comercial, WhatsApp puede mostrarse.
-- Si el usuario ya está listo para avanzar, WhatsApp puede mostrarse aunque también se pida teléfono.
-- No metas en el "reply" pedidos de teléfono largos o repetidos.
-- Si está en una calculadora y la consulta encaja, priorizá invitar a usar esa calculadora.
-- El tono debe ser profesional, cercano y natural, en español neutro de Argentina.
+ROL REAL
+- Primero despejar la duda.
+- Después orientar.
+- Solo llevar a calculadora si realmente ayuda.
+- Solo llevar a WhatsApp si ya tiene sentido comercial o de cierre.
+
+NO HACER
+- No inventar datos no confirmados.
+- No prometer stock, precio final, plazos, instalación, compatibilidades exactas ni disponibilidad.
+- No mandar a WhatsApp porque sí.
+- No mencionar botones, links o WhatsApp dentro del reply salvo que sea muy necesario.
+- No pedir teléfono de forma torpe ni insistente.
+- No responder como folleto de ventas.
+
+CUÁNDO PRIORIZAR CADA COSA
+- Consulta general/informativa: responder bien y listo.
+- Consulta de orientación o dimensionamiento: ayudar y dejar abierta la opción de calculadora.
+- Consulta comercial o de cierre: responder breve y dejar lista la derivación comercial.
 
 SALIDA
 Respondé SIEMPRE en JSON válido y nada más:
@@ -83,7 +89,7 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "luz-backend-v7",
+    service: "luz-backend-v8",
     knowledge_loaded: Boolean(FILLSUN_KNOWLEDGE_BASE && FILLSUN_KNOWLEDGE_BASE.length > 50),
     wiki_loaded: Boolean(FILLSUN_WIKI_BASE && FILLSUN_WIKI_BASE.length > 50),
     email_alerts_enabled: isEmailAlertsConfigured(),
@@ -119,27 +125,19 @@ app.post("/api/chat", async (req, res) => {
     const safeSessionId = String(sessionId || "").trim();
     const safeMessagesCount = Number(messagesCount || 0);
 
-    const interestTag = detectInterestTag(safeMessage, safePageTitle, safePageUrl);
-    const commercialIntent = detectCommercialIntent(safeMessage);
-    const calculatorPage = isCalculatorPage(safePageTitle, safePageUrl);
-    const calculatorIntent = detectCalculatorIntent(safeMessage);
+    const routing = analyzeRouting({
+      message: safeMessage,
+      pageTitle: safePageTitle,
+      pageUrl: safePageUrl,
+      messagesCount: safeMessagesCount,
+      hasPhone: Boolean(safePhone),
+      hasEmail: Boolean(safeEmail),
+      hasName: Boolean(safeName),
+    });
 
-    let finalPayload;
+    const selectedWiki = pickRelevantWikiSections(FILLSUN_WIKI_BASE, routing.interestTag);
 
-    if (calculatorPage && calculatorIntent && !commercialIntent) {
-      finalPayload = {
-        reply: buildCalculatorReply({ message: safeMessage, interestTag }),
-        ask_name: false,
-        ask_phone: false,
-        show_whatsapp: false,
-        whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
-        conversationId: safeConversationId || "",
-        interest_tag: interestTag,
-      };
-    } else {
-      const selectedWiki = pickRelevantWikiSections(FILLSUN_WIKI_BASE, interestTag);
-
-      const instructions = `
+    const instructions = `
 ${BASE_SYSTEM_PROMPT}
 
 BASE OPERATIVA FILLSUN
@@ -149,9 +147,8 @@ WIKI COMPLEMENTARIA RELEVANTE
 ${selectedWiki}
 `;
 
-      const userContext = `
-IMPORTANTE: devolvé la respuesta en formato json válido.
-Usá exactamente estas claves:
+    const userContext = `
+IMPORTANTE: devolvé la respuesta en formato JSON válido con estas claves exactas:
 reply, ask_name, ask_phone, show_whatsapp, whatsapp_text.
 
 CONTEXTO DEL USUARIO
@@ -160,86 +157,77 @@ CONTEXTO DEL USUARIO
 - Teléfono: ${safePhone || "no informado"}
 - Página actual: ${safePageTitle || "sin título"}
 - URL actual: ${safePageUrl || "sin URL"}
-- Interés detectado: ${interestTag}
-- Intención comercial: ${commercialIntent ? "sí" : "no"}
-- Está en calculadoras: ${calculatorPage ? "sí" : "no"}
+- Interés detectado: ${routing.interestTag}
+- Etapa detectada: ${routing.stage}
+- Intención comercial: ${routing.commercialIntent ? "sí" : "no"}
+- Necesidad de calculadora: ${routing.calculatorIntent ? "sí" : "no"}
+- Está en página de calculadoras: ${routing.calculatorPage ? "sí" : "no"}
 - Cantidad de mensajes previos: ${safeMessagesCount}
 
 MENSAJE DEL USUARIO
 ${safeMessage}
 `;
 
-      const response = await client.responses.create({
-        model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
-        previous_response_id: safeConversationId || undefined,
-        input: userContext,
-        instructions,
-        max_output_tokens: 260,
-      });
+    const response = await client.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-5.4-mini",
+      previous_response_id: safeConversationId || undefined,
+      input: userContext,
+      instructions,
+      max_output_tokens: 220,
+    });
 
-      const rawText = response.output_text || "{}";
-      let parsed = safeParseJson(rawText);
+    const rawText = response.output_text || "{}";
+    const parsed = safeParseJson(rawText) || {};
 
-      if (!parsed) {
-        parsed = {
-          reply:
-            "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.",
-          ask_name: false,
-          ask_phone: false,
-          show_whatsapp: false,
-          whatsapp_text: buildWhatsappText({ name: safeName, message: safeMessage }),
-        };
-      }
+    const reply = finalizeReply({
+      rawReply: parsed.reply,
+      routing,
+      safeMessage,
+    });
 
-      const askPhoneFinal = shouldAskPhone({
-        modelValue: Boolean(parsed.ask_phone),
-        email: safeEmail,
-        name: safeName,
-        phone: safePhone,
-        commercialIntent,
-        safeMessagesCount,
-      });
+    const askPhoneFinal = shouldAskPhone({
+      routing,
+      safeEmail,
+      safeName,
+      safePhone,
+      modelValue: Boolean(parsed.ask_phone),
+    });
 
-      const showWhatsappFinal = shouldShowWhatsapp({
-        modelValue: Boolean(parsed.show_whatsapp),
-        commercialIntent,
-        safePhone,
-        safeMessage,
-        safeMessagesCount,
-      });
+    const cta = buildCTA({
+      routing,
+      safeName,
+      safeMessage,
+      modelWhatsappText: parsed.whatsapp_text,
+    });
 
-      finalPayload = {
-        reply: sanitizeReply(
-          typeof parsed.reply === "string" && parsed.reply.trim()
-            ? parsed.reply.trim()
-            : "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo."
-        ),
-        ask_name: Boolean(parsed.ask_name),
-        ask_phone: askPhoneFinal,
-        show_whatsapp: showWhatsappFinal,
-        whatsapp_text:
-          typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
-            ? parsed.whatsapp_text.trim()
-            : buildWhatsappText({ name: safeName, message: safeMessage }),
-        conversationId: response.id,
-        interest_tag: interestTag,
-      };
-    }
+    const finalPayload = {
+      reply,
+      ask_name: false,
+      ask_phone: askPhoneFinal,
+      show_whatsapp: cta.type === "whatsapp",
+      whatsapp_text:
+        typeof parsed.whatsapp_text === "string" && parsed.whatsapp_text.trim()
+          ? parsed.whatsapp_text.trim()
+          : buildWhatsappText({ name: safeName, message: safeMessage }),
+      cta_type: cta.type,
+      cta_label: cta.label,
+      cta_url: cta.url,
+      calculator_url: CALCULATORS_URL,
+      interest_tag: routing.interestTag,
+      stage: routing.stage,
+      conversationId: response.id,
+    };
 
     const shouldSyncBrevo =
       Boolean(safeEmail) &&
-      (
-        commercialIntent ||
-        Boolean(safePhone) ||
-        safeMessagesCount >= 2
-      );
+      (routing.commercialIntent || Boolean(safePhone) || safeMessagesCount >= 2);
 
     if (shouldSyncBrevo) {
       await upsertBrevoContact({
         email: safeEmail,
         name: safeName,
         phone: safePhone,
-        interestTag,
+        interestTag: routing.interestTag,
         pageTitle: safePageTitle,
         pageUrl: safePageUrl,
       });
@@ -248,8 +236,8 @@ ${safeMessage}
     const shouldSendLeadAlert = shouldSendAlert({
       email: safeEmail,
       phone: safePhone,
-      commercialIntent,
-      showWhatsapp: finalPayload.show_whatsapp,
+      commercialIntent: routing.commercialIntent,
+      ctaType: cta.type,
       message: safeMessage,
     });
 
@@ -257,7 +245,7 @@ ${safeMessage}
       const alertKey = buildAlertKey({
         sessionId: safeSessionId,
         email: safeEmail,
-        interestTag,
+        interestTag: routing.interestTag,
       });
 
       if (!sentLeadAlerts.has(alertKey)) {
@@ -268,8 +256,8 @@ ${safeMessage}
           pageTitle: safePageTitle,
           pageUrl: safePageUrl,
           message: safeMessage,
-          interestTag,
-          commercialIntent,
+          interestTag: routing.interestTag,
+          commercialIntent: routing.commercialIntent,
           assistantReply: finalPayload.reply,
         });
 
@@ -282,33 +270,93 @@ ${safeMessage}
     console.error("[LUZ_BACKEND_ERROR]", error);
     return res.status(500).json({
       reply:
-        "Ahora mismo no pude procesar bien tu consulta. Para seguirlo sin demoras, te conviene continuar por WhatsApp con el equipo de FILLSUN.",
+        "Ahora mismo no pude procesar bien tu consulta. Si querés seguir sin vueltas, podés escribirnos por WhatsApp.",
       ask_name: false,
       ask_phone: false,
       show_whatsapp: true,
       whatsapp_text: buildWhatsappText({ message: "Consulta desde Luz" }),
+      cta_type: "whatsapp",
+      cta_label: "Seguir por WhatsApp",
+      cta_url: buildWhatsappUrl(buildWhatsappText({ message: "Consulta desde Luz" })),
+      calculator_url: CALCULATORS_URL,
+      interest_tag: "general",
+      stage: "fallback",
       conversationId: "",
     });
   }
 });
 
+function analyzeRouting({
+  message = "",
+  pageTitle = "",
+  pageUrl = "",
+  messagesCount = 0,
+  hasPhone = false,
+  hasEmail = false,
+  hasName = false,
+}) {
+  const joined = `${message} ${pageTitle} ${pageUrl}`.toLowerCase();
+
+  const interestTag = detectInterestTag(message, pageTitle, pageUrl);
+  const calculatorPage = isCalculatorPage(pageTitle, pageUrl);
+  const calculatorIntent = detectCalculatorIntent(message);
+  const commercialIntent = detectCommercialIntent(message);
+  const explicitWhatsappIntent = /whatsapp|asesor|persona|humano|hablar con alguien|hablar con una persona|contacto directo|pasame tu n[uú]mero|n[uú]mero de contacto/i.test(joined);
+  const infoIntent = detectInformationalIntent(message);
+  const closingIntent = /quiero comprar|quiero instalar|quiero cotizar|necesito presupuesto|presupuesto|cotizaci[oó]n|visita|coordinar|hablar con ventas|comprar/i.test(joined);
+
+  let stage = "inform";
+
+  if (closingIntent || explicitWhatsappIntent) {
+    stage = "close";
+  } else if (commercialIntent || (hasPhone && messagesCount >= 2)) {
+    stage = "commercial";
+  } else if (calculatorIntent) {
+    stage = "calculator";
+  } else if (!infoIntent && messagesCount >= 2) {
+    stage = "orient";
+  }
+
+  if (calculatorPage && stage === "calculator") {
+    stage = "calculator_on_page";
+  }
+
+  return {
+    interestTag,
+    calculatorPage,
+    calculatorIntent,
+    commercialIntent,
+    explicitWhatsappIntent,
+    infoIntent,
+    closingIntent,
+    stage,
+    messagesCount,
+    hasPhone,
+    hasEmail,
+    hasName,
+  };
+}
+
 function detectInterestTag(message = "", pageTitle = "", pageUrl = "") {
   const text = `${message} ${pageTitle} ${pageUrl}`.toLowerCase();
 
-  if (/termotanque|termo|agua caliente|heat pipe|presurizado/.test(text)) return "termotanques";
+  if (/termotanque|termo\b|agua caliente|heat pipe|presurizado|tubos al vac[ií]o/.test(text)) return "termotanques";
   if (/colector|epdm|pileta|piscina|climatiz/.test(text)) return "colectores";
-  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|kites?/.test(text)) return "paneles";
+  if (/panel|fotovolta|inversor|bater[ií]a|kit solar|on grid|off grid|h[ií]brido/.test(text)) return "paneles";
   if (/showroom/.test(text)) return "showroom";
   if (/contacto|direccion|direcci[oó]n|ubicaci[oó]n|telefono|tel[eé]fono|mail|correo/.test(text)) return "contacto";
 
   return "general";
 }
 
+function detectInformationalIntent(message = "") {
+  const text = String(message || "").toLowerCase();
+  return /(que es|qué es|como funciona|cómo funciona|sirve|conviene|diferencia|ventaja|beneficio|para qué|para que|funciona en invierno|mantenimiento|duraci[oó]n|cu[aá]l es la diferencia|explicame|explicame|informaci[oó]n)/.test(text);
+}
+
 function detectCommercialIntent(message = "") {
   const text = String(message || "").toLowerCase();
-  return /precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|quiero comprar|asesor|hablar|whatsapp|visita|stock|disponibilidad|link|pasame/.test(
-    text
-  );
+  return /(precio|presupuesto|cotiza|cotizaci[oó]n|instalaci[oó]n|compra|comprar|quiero comprar|asesor|visita|stock|disponibilidad|promo|oferta|financiaci[oó]n|env[ií]o|envio|pagar|se puede pedir)/.test(text);
 }
 
 function isCalculatorPage(pageTitle = "", pageUrl = "") {
@@ -318,88 +366,142 @@ function isCalculatorPage(pageTitle = "", pageUrl = "") {
 
 function detectCalculatorIntent(message = "") {
   const text = String(message || "").toLowerCase();
-  return /cu[aá]ntos|cu[aá]nto|cu[aá]l necesito|me conviene|dimensionar|consumo|ahorro|paneles necesito|termotanque necesito|sirve para mi casa|para mi casa/.test(
-    text
-  );
+  return /(cu[aá]ntos|cu[aá]nto|cu[aá]l necesito|me conviene para mi casa|para cu[aá]ntas personas|para cuantas personas|dimensionar|dimensionamiento|consumo|ahorro|paneles necesito|termotanque necesito|sirve para mi casa|para mi casa|qué equipo me conviene|que equipo me conviene|qué capacidad|que capacidad|cuánta superficie|cuanta superficie)/.test(text);
 }
 
-function buildCalculatorReply({ message = "", interestTag = "general" }) {
-  const text = String(message || "").toLowerCase();
+function finalizeReply({ rawReply = "", routing, safeMessage = "" }) {
+  let clean = sanitizeReply(rawReply);
 
-  if (interestTag === "paneles") {
-    return "Eso depende del consumo que quieras cubrir y del tipo de sistema. En esta misma página podés usar la calculadora para estimarlo. Si querés, después te ayudo a interpretar el resultado.";
+  if (!clean || clean.length < 8) {
+    clean = fallbackReplyForStage(routing, safeMessage);
   }
 
-  if (interestTag === "termotanques") {
-    return "Para estimar qué equipo puede servirte, conviene mirar cantidad de personas y nivel de uso de agua caliente. Si estás en la calculadora, podés usarla como referencia inicial y después te ayudo a seguir.";
+  if (routing.stage === "calculator" && !routing.calculatorPage) {
+    clean = softenIntoCalculator(clean, routing.interestTag);
   }
 
-  if (interestTag === "colectores") {
-    return "Para orientarlo bien hay que mirar medidas de la pileta y objetivo de uso. Si estás en la calculadora, usala como referencia inicial y después seguimos con lo que te dé.";
+  if (routing.stage === "calculator_on_page") {
+    clean = replyForCalculatorPage(routing.interestTag, clean);
   }
 
-  if (/ahorro/.test(text)) {
-    return "El ahorro depende del consumo y del sistema que quieras evaluar. En esta misma página podés usar la calculadora para hacer una estimación inicial.";
+  if (routing.stage === "commercial" || routing.stage === "close") {
+    clean = keepCommercialReplyTight(clean);
   }
 
-  return "En esta página podés usar la calculadora para hacer una estimación inicial. Si querés, después te ayudo a interpretar el resultado.";
+  return clean;
 }
 
-function shouldAskPhone({
-  modelValue = false,
-  email = "",
-  name = "",
-  phone = "",
-  commercialIntent = false,
-  safeMessagesCount = 0,
-}) {
-  if (phone) return false;
-  if (!email) return false;
-  if (!name) return false;
-  if (commercialIntent) return true;
-  if (modelValue && safeMessagesCount >= 4) return true;
+function fallbackReplyForStage(routing, message = "") {
+  if (routing.stage === "calculator_on_page") {
+    return replyForCalculatorPage(routing.interestTag, "");
+  }
+
+  if (routing.stage === "calculator") {
+    return softenIntoCalculator("Para orientarlo bien conviene estimarlo con una referencia inicial.", routing.interestTag);
+  }
+
+  if (routing.stage === "commercial" || routing.stage === "close") {
+    return "Puedo orientarte por acá, pero en este punto ya conviene seguirlo directo con el equipo para verlo bien según tu caso.";
+  }
+
+  return "Te ayudo con eso. Contame un poco más del uso que querés darle y te oriento con una respuesta más concreta.";
+}
+
+function softenIntoCalculator(text = "", interestTag = "general") {
+  const baseByTag = {
+    paneles:
+      "Para orientarlo bien hay que mirar consumo y objetivo del sistema. La calculadora te sirve como primer paso y después, si querés, seguís con una recomendación más fina.",
+    termotanques:
+      "Para acercarte bien hay que mirar cuántas personas usan el agua caliente y el nivel de uso. La calculadora te sirve como referencia inicial y después seguís con el equipo más adecuado.",
+    colectores:
+      "Para orientarlo bien hay que mirar tamaño de la pileta y objetivo de uso. La calculadora te da una referencia inicial bastante útil para arrancar.",
+    general:
+      "Para orientarlo mejor conviene hacer primero una estimación inicial con la calculadora y después seguir según el resultado.",
+  };
+
+  const clean = String(text || "").trim();
+  if (!clean) return baseByTag[interestTag] || baseByTag.general;
+
+  return `${stripCtaMentions(clean)} ${baseByTag[interestTag] || baseByTag.general}`.trim();
+}
+
+function replyForCalculatorPage(interestTag = "general", current = "") {
+  const map = {
+    paneles:
+      "Eso depende del consumo que quieras cubrir y del tipo de sistema. Usá la calculadora como referencia inicial y, si querés, después seguís con una orientación más puntual.",
+    termotanques:
+      "Para estimarlo bien hay que mirar cantidad de personas y uso de agua caliente. Usá la calculadora como primer paso y después afinás la decisión.",
+    colectores:
+      "Para orientarlo bien hay que mirar medidas de la pileta y objetivo de uso. La calculadora te da una base bastante útil para arrancar.",
+    general:
+      "La calculadora te sirve como referencia inicial. Después, con ese resultado, es más fácil orientarte mejor.",
+  };
+
+  if (!current) return map[interestTag] || map.general;
+
+  const clean = stripCtaMentions(current);
+  if (/calculadora/i.test(clean)) return clean;
+  return `${clean} ${map[interestTag] || map.general}`.trim();
+}
+
+function keepCommercialReplyTight(text = "") {
+  let clean = stripCtaMentions(text);
+  clean = clean.replace(/\s{2,}/g, " ").trim();
+
+  if (clean.length > 280) {
+    clean = `${clean.slice(0, 277).trim()}...`;
+  }
+
+  return clean || "En este punto ya conviene seguirlo directo con el equipo para verlo bien según tu caso.";
+}
+
+function buildCTA({ routing, safeName = "", safeMessage = "", modelWhatsappText = "" }) {
+  if (routing.stage === "calculator" && !routing.calculatorPage) {
+    return {
+      type: "calculator",
+      label: "Ir a calculadoras",
+      url: CALCULATORS_URL,
+    };
+  }
+
+  if (routing.stage === "close" || routing.explicitWhatsappIntent) {
+    const text = modelWhatsappText?.trim() || buildWhatsappText({ name: safeName, message: safeMessage });
+    return {
+      type: "whatsapp",
+      label: "Seguir por WhatsApp",
+      url: buildWhatsappUrl(text),
+    };
+  }
+
+  if (routing.stage === "commercial" && routing.messagesCount >= 1) {
+    const text = modelWhatsappText?.trim() || buildWhatsappText({ name: safeName, message: safeMessage });
+    return {
+      type: "whatsapp",
+      label: "Consultar por WhatsApp",
+      url: buildWhatsappUrl(text),
+    };
+  }
+
+  return { type: "none", label: "", url: "" };
+}
+
+function shouldAskPhone({ routing, safeEmail = "", safeName = "", safePhone = "", modelValue = false }) {
+  if (safePhone) return false;
+  if (!safeEmail || !safeName) return false;
+
+  if (routing.stage === "close") return true;
+  if (routing.stage === "commercial" && routing.messagesCount >= 2) return true;
+  if (modelValue && routing.messagesCount >= 4) return true;
+
   return false;
 }
 
-function shouldShowWhatsapp({
-  modelValue = false,
-  commercialIntent = false,
-  safePhone = "",
-  safeMessage = "",
-  safeMessagesCount = 0,
-}) {
-  const text = String(safeMessage || "").toLowerCase();
-
-  if (/pasame el link|pasame whatsapp|dame el whatsapp|quiero hablar con alguien|quiero hablar con una persona|asesor|hablar con una persona|hablar con alguien/.test(text)) {
-    return true;
-  }
-
-  if (commercialIntent) return true;
-  if (safePhone && safeMessagesCount >= 3) return true;
-  if (modelValue && safeMessagesCount >= 5) return true;
-
-  return false;
-}
-
-function shouldSendAlert({
-  email = "",
-  phone = "",
-  commercialIntent = false,
-  showWhatsapp = false,
-  message = "",
-}) {
+function shouldSendAlert({ email = "", phone = "", commercialIntent = false, ctaType = "none", message = "" }) {
   const hasEmail = Boolean(email);
   const hasPhone = Boolean(phone);
   const hasRealQuestion = String(message || "").trim().length >= 8;
 
-  return (
-    hasRealQuestion &&
-    (
-      (hasEmail && hasPhone) ||
-      (hasEmail && commercialIntent) ||
-      (hasEmail && showWhatsapp && commercialIntent)
-    )
-  );
+  return hasRealQuestion && ((hasEmail && hasPhone) || (hasEmail && commercialIntent) || (hasEmail && ctaType === "whatsapp"));
 }
 
 function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) {
@@ -409,10 +511,10 @@ function buildAlertKey({ sessionId = "", email = "", interestTag = "general" }) 
 function isEmailAlertsConfigured() {
   return Boolean(
     process.env.SMTP_HOST &&
-    process.env.SMTP_PORT &&
-    process.env.SMTP_USER &&
-    process.env.SMTP_PASS &&
-    process.env.LEAD_ALERT_TO
+      process.env.SMTP_PORT &&
+      process.env.SMTP_USER &&
+      process.env.SMTP_PASS &&
+      process.env.LEAD_ALERT_TO
   );
 }
 
@@ -436,16 +538,8 @@ function normalizePhoneForBrevo(phone = "") {
   return `+54${cleaned}`;
 }
 
-async function upsertBrevoContact({
-  email = "",
-  name = "",
-  phone = "",
-  interestTag = "general",
-  pageTitle = "",
-  pageUrl = "",
-}) {
-  if (!isBrevoConfigured()) return false;
-  if (!email) return false;
+async function upsertBrevoContact({ email = "", name = "", phone = "", interestTag = "general", pageTitle = "", pageUrl = "" }) {
+  if (!isBrevoConfigured() || !email) return false;
 
   try {
     const attributes = {
@@ -549,24 +643,31 @@ function buildWhatsappText({ name = "", message = "" }) {
   return `Hola FILLSUN, ${introName}ya hablé con Luz y quiero seguir mi consulta.${topic}`.trim();
 }
 
+function buildWhatsappUrl(text = "") {
+  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(text || "Hola FILLSUN")}`;
+}
+
+function stripCtaMentions(text = "") {
+  return String(text || "")
+    .replace(/whatsapp/gi, "")
+    .replace(/seguir por el equipo comercial/gi, "")
+    .replace(/seguimos por /gi, "")
+    .replace(/pod[eé]s escribirnos/gi, "")
+    .replace(/contactanos/gi, "")
+    .replace(/consultanos/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function sanitizeReply(text = "") {
   let clean = String(text || "").trim();
 
-  clean = clean.replace(
-    /si quer[eé]s,?\s*(tambi[eé]n\s*)?pod[eé]s dejarme un tel[eé]fono[^.?!]*[.?!]?/gi,
-    ""
-  );
-
-  clean = clean.replace(
-    /dejame tu tel[eé]fono[^.?!]*[.?!]?/gi,
-    ""
-  );
-
+  clean = clean.replace(/si quer[eé]s,?\s*(tambi[eé]n\s*)?pod[eé]s dejarme un tel[eé]fono[^.?!]*[.?!]?/gi, "");
+  clean = clean.replace(/dejame tu tel[eé]fono[^.?!]*[.?!]?/gi, "");
+  clean = clean.replace(/escribinos por whatsapp[^.?!]*[.?!]?/gi, "");
+  clean = clean.replace(/te paso el whatsapp[^.?!]*[.?!]?/gi, "");
+  clean = clean.replace(/si quer[eé]s seguirlo por whatsapp[^.?!]*[.?!]?/gi, "");
   clean = clean.replace(/\n{3,}/g, "\n\n").trim();
-
-  if (!clean) {
-    return "No tengo esa información confirmada dentro de FILLSUN. Para verificarlo bien, lo mejor es seguir por WhatsApp con el equipo.";
-  }
 
   return clean;
 }
@@ -617,8 +718,7 @@ function splitMarkdownSections(markdown = "") {
   const normalized = String(markdown || "").trim();
   if (!normalized) return [];
 
-  const parts = normalized.split(/\n(?=##\s)/g).map((part) => part.trim()).filter(Boolean);
-  return parts;
+  return normalized.split(/\n(?=##\s)/g).map((part) => part.trim()).filter(Boolean);
 }
 
 app.listen(PORT, () => {
