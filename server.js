@@ -543,6 +543,7 @@ function buildCTA({ routing, safeName = "", safeMessage = "", modelWhatsappText 
 
   return { type: "none", label: "", url: "" };
 }
+
 function shouldAskPhone({ routing, safeEmail = "", safeName = "", safePhone = "", modelValue = false }) {
   if (safePhone) return false;
   if (!safeEmail || !safeName) return false;
